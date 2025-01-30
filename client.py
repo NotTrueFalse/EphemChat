@@ -47,7 +47,7 @@ class Client:
         if not ciphertext:
             raise ValueError("Ciphertext cannot be empty.")
         OT_verifier = r.randbytes(ONE_TIME_LENGTH)
-        #sub random iterator to prevent using 32 credit of the main random iterator
+        #sub random iterator to prevent using idk much credit
         r_for_place = Shake256PRNG(r.randbytes(32))#use a new random iterator to shuffle the indexes
 
         indexes = list(range(len(ciphertext) + ONE_TIME_LENGTH))  # Account for added bytes
@@ -228,10 +228,9 @@ class Client:
                         # print(f"snap after check_one_time: {r.get_state().hex()}")#debug
                         if data:
                             r.set_state(r_state)#restore the state of the random iterator
-                            print("DECRYPT")
                             message = self.aes_decrypt(data, self.contacts[contact]["main_key"], r)
                             for i in range(2):r.randbytes(32)#use two credit of the random iterator
-                            print(f"{contact}: {message.decode('utf-8')}")#decode the message
+                            print(f"{contact}: {message.decode('utf-8', errors='ignore')}")
                             break
                         else:
                             self.contacts[contact]["random_iterator"].set_state(r_state)#restore the state of the random iterator
@@ -243,6 +242,12 @@ class Client:
     # Main client function
     def main(self):
         global SERVER_HOST, SERVER_PORT, ADDRESS_LENGTH, MAIN_KEY_LENGTH
+
+        pseudo_main_key = os.urandom(MAIN_KEY_LENGTH)
+        self.test = {
+            "rnd":Shake256PRNG(pseudo_main_key),
+            "main_key":pseudo_main_key
+        }
         # Generate 10 random addresses
         for i in range(10):
             addr,seed = self.generate_address(),self.generate_address()
@@ -251,7 +256,7 @@ class Client:
         print("Welcome to the chat client!")
         Thread(target=self.listen_for_messages, daemon=True).start()
 
-        options = ("List addresses", "add contact" ,"chat", "Exit")
+        options = ("List addresses", "add contact" ,"chat", "test", "Exit")
         while True:
             print("Options:")
             for i, option in enumerate(options):
@@ -297,11 +302,28 @@ class Client:
                 message = input("Enter your message: ")
                 main_key = self.contacts[contact]["main_key"]
                 r = self.contacts[contact]["random_iterator"]
-                print("ENCRYPT")
                 message = self.aes_encrypt(message, main_key, r)#use one credit of the random iterator
                 message = self.add_one_time(message,r)#use two credit of the random iterator
                 self.client.sendall(message)
             elif choice == "4":
+                # create a test message, encrypt it, add OTV, remove OTV, decrypt it
+                message = "This is a test message."
+                r = self.test["rnd"]
+                saved_state = r.get_state()#save the state of the random iterator
+                ciphertext = self.aes_encrypt(message, self.test["main_key"], r)
+                ciphertext = self.add_one_time(ciphertext, r)
+                print(f"Encrypted message: {ciphertext.hex()}")#should print the ciphertext
+                r.set_state(saved_state)#restore the state of the random iterator
+                r.randbytes(32)#simulate the random iterator to get the same state as the sender
+                ciphertext = self.check_one_time(ciphertext, r)
+                if ciphertext:
+                    r.set_state(saved_state)#restore the state of the random iterator
+                    decrypted = self.aes_decrypt(ciphertext, self.test["main_key"], r)
+                    for i in range(2):r.randbytes(32)#use two credit of the random iterator
+                    print(f"Decrypted message: {decrypted.decode('utf-8')}")#should print the message
+                else:
+                    print("[-] Error in the OTV check <- something is wrong")
+            elif choice == "5":
                 self.client.close()
                 exit()
             else:
