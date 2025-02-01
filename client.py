@@ -311,25 +311,25 @@ class Client:
                 r = self.test["rnd"]
                 for i in range(2):
                     saved_state = r.get_state()#save the state of the random iterator
-                    print(f"SNAP START {saved_state.hex()}")
+                    # print(f"SNAP START {saved_state.hex()}")
                     ciphertext = self.aes_encrypt(message, self.test["main_key"], r)
-                    print(f"SNAP ENCRYPT {r.get_state().hex()}")
+                    # print(f"SNAP ENCRYPT {r.get_state().hex()}")
                     ciphertext = self.add_one_time(ciphertext, r)
-                    print(f"SNAP ONE TIME {r.get_state().hex()}")
+                    # print(f"SNAP ONE TIME {r.get_state().hex()}")
                     print(f"Encrypted message: {ciphertext.hex()}")#should print the ciphertext
                     r.set_state(saved_state)#restore the state of the random iterator
-                    print(f"SNAP RESET1 {r.get_state().hex()}")
+                    # print(f"SNAP RESET1 {r.get_state().hex()}")
                     self.aes_encrypt(message, self.test["main_key"], r)
-                    print(f"SNAP SIMULATE1 {r.get_state().hex()}")
+                    # print(f"SNAP SIMULATE1 {r.get_state().hex()}")
                     ciphertext = self.check_one_time(ciphertext, r)
-                    print(f"SNAP ONE TIME2 {r.get_state().hex()}")
+                    # print(f"SNAP ONE TIME2 {r.get_state().hex()}")
                     if ciphertext:
                         r.set_state(saved_state)#restore the state of the random iterator
-                        print(f"SNAP RESET2 {r.get_state().hex()}")
+                        # print(f"SNAP RESET2 {r.get_state().hex()}")
                         decrypted = self.aes_decrypt(ciphertext, self.test["main_key"], r)
-                        print(f"SNAP DECRYPT {r.get_state().hex()}")
+                        # print(f"SNAP DECRYPT {r.get_state().hex()}")
                         for i in range(2):r.randbytes(32)#use two credit of the random iterator
-                        print(f"SNAP SIMULATE2 {r.get_state().hex()}")
+                        # print(f"SNAP SIMULATE2 {r.get_state().hex()}")
                         print(f"Decrypted message: {decrypted.decode('utf-8')}")#should print the message
                     else:
                         print("[-] Error in the OTV check <- something is wrong")
