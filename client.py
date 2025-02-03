@@ -97,7 +97,7 @@ class Client:
         return secrets.token_hex(length//2)
 
     # AES Encryption
-    def aes_encrypt(self, plaintext: bytes, password: bytes, random_iterator:Shake256PRNG=Shake256PRNG(b"\x00"))->bytes:
+    def aes_encrypt(self, plaintext: bytes, password: bytes, random_iterator:Shake256PRNG)->bytes:
         """
         Encrypts the given plaintext using AES encryption with the provided password.
 
@@ -130,7 +130,7 @@ class Client:
         return ciphertext
 
     # AES Decryption
-    def aes_decrypt(self, ciphertext: bytes, password: bytes, random_iterator:Shake256PRNG=Shake256PRNG(b"\x00")) -> bytes:
+    def aes_decrypt(self, ciphertext: bytes, password: bytes, random_iterator:Shake256PRNG) -> bytes:
         if isinstance(password, str):
             password = password.encode("utf-8")
         if len(password) != 32:
@@ -164,11 +164,13 @@ class Client:
                         #its me :D
                         offset += ADDRESS_LENGTH
                         contact = data[offset:offset+ADDRESS_LENGTH+(16%ADDRESS_LENGTH)]#to match the required length of AES that is %16 == 0
-                        contact = self.aes_decrypt(contact, self.address[to_addr]["seed"])
+                        null_iterator = Shake256PRNG(b"\x00")
+                        contact = self.aes_decrypt(contact, self.address[to_addr]["seed"],null_iterator)
                         contact = contact.decode("utf-8")
                         offset += ADDRESS_LENGTH+(16%ADDRESS_LENGTH)
                         main_key = data[offset:offset+MAIN_KEY_LENGTH+(16%MAIN_KEY_LENGTH)]#match requirements
-                        main_key = self.aes_decrypt(main_key, self.address[to_addr]["seed"])#don't decode its mainly random bytes
+                        null_iterator = Shake256PRNG(b"\x00")
+                        main_key = self.aes_decrypt(main_key, self.address[to_addr]["seed"],null_iterator)#don't decode its mainly random bytes
                         r = Shake256PRNG(main_key,debug=True)
                         self.contacts[contact] = {"main_key":main_key,"random_iterator":r}
                         print(f"\n[+] You have a new contact: {contact}")
@@ -178,7 +180,8 @@ class Client:
                         #1:11 -> MY CONTACT ADDRESS
                         #11:43 -> VERIFIER (hash of the main key)
                         contact_address = self.generate_address()
-                        contact_address = self.aes_encrypt(contact_address, main_key)
+                        null_iterator = Shake256PRNG(b"\x00")
+                        contact_address = self.aes_encrypt(contact_address, main_key,null_iterator)
                         ph = PasswordHasher(
                             time_cost=2,
                             memory_cost=2**17,
@@ -204,14 +207,17 @@ class Client:
                     #find the key that matches the verifier
                     for contact_address in self.contacts:
                         p = self.contacts[contact_address]["main_key"]
-                        if ph.verify(verifier,p):
-                            print(f"\n[*] verfied a contact")
-                            break
+                        try:
+                            if ph.verify(verifier,p):
+                                print(f"\n[*] verfied a contact")
+                                break
+                        except:pass#verify naturaly retrn an exception
                     else:
                         print(f"\n[-] Couldn't verify the contact ({verifier})")
                         continue
                     contact = data[offset:offset+ADDRESS_LENGTH+(16%ADDRESS_LENGTH)]
-                    contact = self.aes_decrypt(contact, p).decode("utf-8")#replace random contact with the real one
+                    null_iterator = Shake256PRNG(b"\x00")
+                    contact = self.aes_decrypt(contact, p, null_iterator).decode("utf-8")#replace random contact with the real one
                     self.contacts[contact] = self.contacts[contact_address].copy()
                     del self.contacts[contact_address]#remove the random contact
                     print(f"[+] You have a new contact: {contact}")
@@ -273,13 +279,16 @@ class Client:
                     continue
                 me_contact = self.generate_address()
                 print(f"me_contact: {me_contact}")
-                me_contact = self.aes_encrypt(me_contact, seed)
+                null_iterator = Shake256PRNG(b"\x00")
+                me_contact = self.aes_encrypt(me_contact, seed, null_iterator)
+                print(f"send encrypted: {me_contact}")
                 main_key = os.urandom(MAIN_KEY_LENGTH)
                 # print(f"main_key: {main_key}")#debug
                 idk_contact = self.generate_address()
                 r = Shake256PRNG(main_key,debug=True)
                 self.contacts[idk_contact] = {"main_key":main_key,"random_iterator":r}#temporarly save a random contact instead of the real one
-                main_key = self.aes_encrypt(main_key, seed)
+                null_iterator = Shake256PRNG(b"\x00")
+                main_key = self.aes_encrypt(main_key, seed, null_iterator)
                 payload = ASK_OPCODE + address.encode("utf-8") + me_contact + main_key
                 self.client.sendall(payload)
             elif choice == "3":
