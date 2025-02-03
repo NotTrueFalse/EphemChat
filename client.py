@@ -213,7 +213,8 @@ class Client:
                                 break
                         except:pass#verify naturaly retrn an exception
                     else:
-                        print(f"\n[-] Couldn't verify the contact ({verifier})")
+                        #can happen when two random personne try to match 
+                        #print(f"\n[-] Couldn't verify the contact ({verifier})")
                         continue
                     contact = data[offset:offset+ADDRESS_LENGTH+(16%ADDRESS_LENGTH)]
                     null_iterator = Shake256PRNG(b"\x00")
