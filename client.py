@@ -8,12 +8,12 @@ import secrets
 from CPRNG import Shake256PRNG
 from tkinter import filedialog
 
-SERVER_HOST = '127.0.0.1'
+SERVER_HOST = '0.0.0.0'
 SERVER_PORT = 12345
 #change OPCODE OR ID_LENGTH to be more or less stealth
 ASK_OPCODE = b"\x15"
 ACCEPT_OPCODE = b"\x16"
-ADDRESS_LENGTH = 10#16^16-16^15 => 1.7293823x10^19 possibilities ((1.7293823x10^19)/(1000*60*60*24*365.24) => 548023185 years to test all possibilities if we go at 1 adderss per ms)
+ADDRESS_LENGTH = 10#10^63-9^63 => 9.9868998e+62  possibilities ((9.9868998e+62 )/(1000*60*60*24*365.24) => 3.1647442e+52 years to test all possibilities if we go at 1 adderss per ms)
 #this is just for security, you can get it higher but if you choose to lower it will be easier to bruteforce (not recommended)
 MAIN_KEY_LENGTH = 32
 #used to find your partner: OTV (One Time Verifier added randomly to the message)
