@@ -22,7 +22,7 @@ The OTV is a cryptographically secure random value generated to verify the ident
 
 ## Current Status
 
-⚠️ **Under Construction**: The project is still in development. A bug in the random generator is currently being investigated. Once resolved, a stable version will be released.
+⚠️ **Under Construction**: Gonna do the Gui now
 
 ## Feedback and Contributions
 
