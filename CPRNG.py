@@ -52,7 +52,7 @@ class Shake256PRNG:
         self.state = state
         # self.shaker = hashlib.shake_256()  # Reset the shaker
         # self.shaker.update(self.state)  # Update with the new state
-        if self.debug:print(f"changed state {self.state.hex()}")
+        # if self.debug:print(f"changed state {self.state.hex()}")
 
     def shuffle(self, lst:list):
         """Shuffle a list randomly"""
@@ -70,10 +70,10 @@ if __name__ == "__main__":
     cprng = Shake256PRNG(seed,debug=True)
     state = cprng.get_state()
     for i in range(5):
-        print(cprng.randbytes(16).hex())
+        print(cprng.randbytes(1).hex())
     cprng.set_state(state)
     for i in range(5):
-        print(cprng.randbytes(16).hex())
+        print(cprng.randbytes(1).hex())
     cprng.set_state(state)
     for i in range(5):
-        print(cprng.randbytes(16).hex())
+        print(cprng.randbytes(1).hex())
