@@ -6,35 +6,68 @@ from threading import Thread
 from hashlib import shake_256
 import secrets
 from CPRNG import Shake256PRNG
-from tkinter import filedialog
+import re
 
 SERVER_HOST = '127.0.0.1'
 SERVER_PORT = 12345
-#change OPCODE OR ID_LENGTH to be more or less stealth
-ASK_OPCODE = b"\x15"#don't ask me why I choose 15, you can configure it to be anything (btw 01 - ff)
-ACCEPT_OPCODE = b"\x16"
-# SEND_OPCODE = b"\x17"
-# SENDING_OPCODE = b"\x18"
 ADDRESS_LENGTH = 10#10^63-9^63 => 9.9868998e+62  possibilities ((9.9868998e+62 )/(1000*60*60*24*365.24) => 3.1647442e+52 years to test all possibilities if we go at 1 adderss per ms)
 #this is just for security, you can get it higher but if you choose to lower it will be easier to bruteforce (not recommended)
 MAIN_KEY_LENGTH = 32
 #used to find your partner: OTV (One Time Verifier added randomly to the message)
 ONE_TIME_LENGTH = 32
-# MAX_FILE_SIZE = 1024**3*4#4GB max accepted file size
 
-# def to_humain_readable(size:int)->str:
-#     for unit in ['Octets', 'Ko', 'Mo', 'Go', 'To']:
-#         if size < 1024.0:
-#             break
-#         size /= 1024.0
-#     return f"{size:.2f} {unit}"
+OK_OPCODE = b"\x01"
+ASK_OPCODE = b"\x15"#don't ask me why I choose 15, you can configure it to be anything (btw 01 - ff)
+ACCEPT_OPCODE = b"\x16"
+SEND_OPCODE = b"\x17"
+SENDING_OPCODE = b"\x18"
+MAX_FILE_SIZE = 1024**3*4#4GB max accepted file size
+def to_humain_readable(size:int)->str:
+    for unit in ['Octets', 'Ko', 'Mo', 'Go', 'To']:
+        if size < 1024.0:
+            break
+        size /= 1024.0
+    return f"{size:.2f} {unit}"
 
 class Client:
-    def __init__(self):
+    def __init__(self, ip:str=SERVER_HOST, port:int=SERVER_PORT):
+        self.ip = ip
+        self.port = port
         self.address = {}#{address:seed} to only use once to generate a contact
         self.contacts = {}#{address:main_key} to use to send messages
         self.send_queue = {}#{address:filename} to send files
-        self.receive_queue = {}#{address:filename} to receive files
+        self.receive_queue = {}#{address:{filename,progress}} to receive files
+        self._events = {}
+        self.address_reg = r"[A-Za-z0-9@]{10}"
+        self.argon_reg = r"[A-Za-z0-9+/]{11,64}\$[A-Za-z0-9+/]{16,86}"
+        for i in range(10):
+            addr,seed = self.generate_address(),self.generate_address()
+            self.address[addr] = {"seed":seed}
+        del addr,seed
+        Thread(target=self.listen_packets, daemon=True).start()
+
+    def event(self, func):
+        self._events[func.__name__] = func
+        return func
+
+    def trigger_event(self, event_name, *args, **kwargs):
+        if event_name in self._events:
+            self._events[event_name](*args, **kwargs)
+
+    def receive_message(self, sender: str, message: str):
+        self.trigger_event('on_message', sender, message)
+
+    def log(self, message: str):
+        self.trigger_event('on_log', message)
+
+    def contact_update(self):
+        self.trigger_event('on_contact_list_update', self.contacts)
+
+    def ask_file(self, sender: str, file_size: int, file_name: str):
+        self.trigger_event('on_ask_file', sender, file_size, file_name)
+
+    def progress(self, sender: str, progress: float):
+        self.trigger_event('on_file_progress', sender, progress)
 
     def iv_generator(self, random_iterator: Shake256PRNG) -> bytes:
         global MAIN_KEY_LENGTH
@@ -169,7 +202,11 @@ class Client:
         #11:21 -> FROM CONTACT ADDRESS
         #21:53 -> MAIN KEY
         to_addr = data[offset:offset+ADDRESS_LENGTH]
-        to_addr = to_addr.decode("utf-8")
+        try:
+            to_addr = to_addr.decode("utf-8")
+            if not re.match(self.address_reg,to_addr):return
+        except:#not a valid address
+            return
         if to_addr in self.address:
             #its me :D
             offset += ADDRESS_LENGTH
@@ -183,7 +220,8 @@ class Client:
             main_key = self.aes_decrypt(main_key, self.address[to_addr]["seed"],null_iterator)#don't decode its mainly random bytes
             r = Shake256PRNG(main_key,debug=True)
             self.contacts[contact] = {"main_key":main_key,"random_iterator":r}
-            print(f"\n[+] You have a new contact: {contact}")
+            self.log(f"You have a new contact: {contact}")
+            self.contact_update()
             # print(f"main_key: {main_key}")#debug
             #now send accept message
             #0:1 -> OPCODE
@@ -201,14 +239,19 @@ class Client:
             verifier = ph.hash(main_key)
             verifier = "$".join(verifier.split("p=")[1].split("$")[1:]).encode("utf-8")#remove indication of how the hash was made
             payload = ACCEPT_OPCODE + verifier + contact_address
-            self.client.sendall(payload)
+            self.conn.sendall(payload)
             del self.address[to_addr]#remove the address from the list (its used only once)
 
     def verify(self,data:bytes,offset:int):
         #0:32 -> VERIFIER
         #32:42 -> CONTACT ADDRESS
         verifier = data[offset:offset+MAIN_KEY_LENGTH*2+2]
-        verifier = "$argon2id$v=19$m=131072,t=2,p=2$" + verifier.decode("utf-8")
+        try:
+            verifier = verifier.decode("utf-8")
+            if not re.match(self.argon_reg,verifier):return
+        except:#not a valid verifier
+            return
+        verifier = "$argon2id$v=19$m=131072,t=2,p=2$" + verifier
         ph = PasswordHasher(
             time_cost=2,
             memory_cost=2**17,
@@ -220,77 +263,90 @@ class Client:
             p = self.contacts[contact_address]["main_key"]
             try:
                 if ph.verify(verifier,p):
-                    print(f"\n[*] verfied a contact")
+                    self.log(f"[*] verfied a contact")
                     break
             except:pass#verify naturaly return an exception
         else:
             #can happen when two random personne try to match
-            #print(f"\n[-] Couldn't verify the contact ({verifier})")
             return
         contact = data[offset:offset+ADDRESS_LENGTH+(16%ADDRESS_LENGTH)]
         null_iterator = Shake256PRNG(b"\x00")
         contact = self.aes_decrypt(contact, p, null_iterator).decode("utf-8")#replace random contact with the real one
         self.contacts[contact] = self.contacts[contact_address].copy()
         del self.contacts[contact_address]#remove the random contact
-        print(f"[+] You have a new contact: {contact}")
+        self.log(f"You have a new contact: {contact}")
+        self.contact_update()
 
     def check_received(self,contact:str,data:bytes):
-            """from a decrypted message check if the message is a request or a message"""
-        # offset = 1
+        """from a decrypted message check if the message is a request or a message"""
+        offset = 1
         #0:1 -> OPCODE
         #1:9 -> FILE SIZE
         #9: -> FILE NAME
-        # if data[0:offset] == SEND_OPCODE:
-        #     #user sent a file
-        #     file_size = int.from_bytes(data[offset:offset+8], "big")
-        #     offset += 8
-        #     file_name = data[offset:].decode("utf-8")
-        #     print(f"\n[+] You received a file: {file_name} ({to_humain_readable(file_size)})")
-        #     accept = input("Do you want to accept the file? (y/n): ").lower() == "y"
-        #     if accept:
-        #         main_key = self.contacts[contact]["main_key"]
-        #         r = self.contacts[contact]["random_iterator"]
-        #         payload = self.aes_encrypt(ACCEPT_OPCODE, main_key, r)
-        #         payload = self.add_one_time(payload,r)
-        #         self.client.sendall(payload)
-        #         self.receive_queue[contact] = filedialog.asksaveasfilename(defaultextension=os.path.splitext(file_name)[1],initialfile=file_name)
-        # elif data[0:offset] == ACCEPT_OPCODE and contact in self.send_queue:
-            #user accepted the file
-            # file_path = self.send_queue[contact]
-            # file_name = os.path.basename(file_path)
-            # file_size = os.path.getsize(file_path)
-            # if file_size > MAX_FILE_SIZE:
-            #     print(f"[-] File size too big ({to_humain_readable(file_size)})")
-            #     return
-            # print(f"[*] Sending file: {file_name} ({to_humain_readable(file_size)})")
-            # with open(file_path, "rb") as f:
-            #     while True:
-            #         chunk = f.read(4096-ONE_TIME_LENGTH-1)#-1 for the opcode, -ONE_TIME_LENGTH for the OTV
-            #         if not chunk:
-            #             break
-            #         main_key = self.contacts[contact]["main_key"]
-            #         r = self.contacts[contact]["random_iterator"]
-            #         payload = self.aes_encrypt(SENDING_OPCODE + chunk, main_key, r)
-            #         payload = self.add_one_time(payload,r)
-            #         self.client.sendall(payload)
-            # print(f"[+] File sent: {file_name}")
-            # del self.send_queue[contact]
-        # elif data[0:offset] == SENDING_OPCODE:
-        #     #user is sending a file
-        #     file_name = self.receive_queue[contact]
-        #     with open(file_name, "ab") as f:
-        #         f.write(data[offset:])
-        #     print(f"[*] Receiving file: {file_name}",end="\r")
-        # else:
-            print(f"\n{contact}: {data.decode('utf-8')}")
+        OPCODE = data[0:offset]
+        if OPCODE == SEND_OPCODE:
+            #user sent a file
+            file_size = int.from_bytes(data[offset:offset+8], "big")
+            offset += 8
+            file_name = data[offset:].decode("utf-8")
+            self.ask_file(contact, file_size, file_name)
+        elif OPCODE == ACCEPT_OPCODE and contact in self.send_queue:
+            # user accepted the file
+            file_name = self.send_queue[contact]["file_name"]
+            file_size = self.send_queue[contact]["file_size"]
+            if file_size > MAX_FILE_SIZE:
+                print(f"[-] File size changed ({to_humain_readable(file_size)} > {to_humain_readable(MAX_FILE_SIZE)})")
+                return
+            self.log(f"[*] Sending file: {file_name} ({to_humain_readable(file_size)})")
+            chunk = self.send_queue[contact]["file"].read(4096-ONE_TIME_LENGTH-1)#-1 for the opcode, -ONE_TIME_LENGTH for the OTV
+            if not chunk:return#file is empty
+            self.send(contact, SENDING_OPCODE + chunk)
+        elif OPCODE == SENDING_OPCODE:
+            #user is sending a file
+            if not self.receive_queue[contact]:return#no file to receive
+            file_name = self.receive_queue[contact]["file_name"]
+            file_size = self.receive_queue[contact]["file_size"]
+            file = self.receive_queue[contact]["file"]
+            file.write(data[offset:])
+            self.receive_queue[contact]["received"] += len(data[offset:])
+            self.progress(contact, self.receive_queue[contact]["received"])
+            self.send(contact, OK_OPCODE)
+        elif OPCODE == OK_OPCODE:
+            if data[offset:] != b"":return#should be empty (prevent receiving block and mis interpret it)
+            if contact in self.send_queue:
+                #user need next chunk
+                file = self.send_queue[contact]["file"]
+                chunk = file.read(4096-ONE_TIME_LENGTH-1)#-1 for the opcode, -ONE_TIME_LENGTH for the OTV
+                if not chunk:
+                    file.close()
+                    del self.send_queue[contact]
+                    self.send(contact, OK_OPCODE)
+                    return
+                self.send(contact, SENDING_OPCODE + chunk)
+            elif contact in self.receive_queue:
+                #done receiving file
+                file = self.receive_queue[contact]["file"]
+                file_name = self.receive_queue[contact]["file_name"]
+                file_size = self.receive_queue[contact]["file_size"]
+                file.close()
+                print(f"file received: {file_name} ({to_humain_readable(file_size)})")
+                del self.receive_queue[contact]
+                self.log(f"[+] File received: {file_name} ({to_humain_readable(file_size)})")
+        else:
+            try:
+                data = data.decode("utf-8")
+            except Exception as e:
+                print(f"[-] Error decoding message: {e}")
+                return
+            self.receive_message(contact, data)
 
     # Client handler to receive messages
     def listen_packets(self):
-        self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.client.connect((SERVER_HOST, SERVER_PORT))
+        self.conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.conn.connect((self.ip, self.port))
         while True:
             # try:
-                data = self.client.recv(4096)
+                data = self.conn.recv(4096)
                 if not data:continue
                 offset = 1
                 if data[0:offset] == ASK_OPCODE:
@@ -313,8 +369,7 @@ class Client:
                             break
                         else:
                             self.contacts[contact]["random_iterator"].set_state(contact_random_iterator_state)#restore the state of the random iterator
-                    
-                            # print("[-] Block not from a contact")
+                            print("[-] Block not from a contact")
             # except Exception as e:
             #     print(f"Error receiving message: {e}")
             #     break
@@ -331,95 +386,14 @@ class Client:
         null_iterator = Shake256PRNG(b"\x00")
         main_key = self.aes_encrypt(main_key, seed, null_iterator)
         payload = ASK_OPCODE + address.encode("utf-8") + me_contact + main_key
-        self.client.sendall(payload)
+        self.conn.sendall(payload)
 
-    def send_message(self, contact: str, message: str):
+    def send(self, contact: str, payload: bytes):
         main_key = self.contacts[contact]["main_key"]
         r = self.contacts[contact]["random_iterator"]
-        message = self.aes_encrypt(message, main_key, r)#use one credit of the random iterator
-        message = self.add_one_time(message,r)#use two credit of the random iterator
-        self.client.sendall(message)
-
-    def _get_contact(self)->str:
-        if len(self.contacts) == 0:
-            print("[-] You don't have any savec contact")
-            return
-        for (i,address) in enumerate(self.contacts.keys()):
-            print(f"{i}. {address}")
-        contact = input("Enter contact n°: ")
-        try:
-            contact = int(contact)
-        except ValueError:
-            print("[-] Invalid contact")
-            return
-        if contact < 0 or contact >= len(self.contacts):
-            print("[-] Invalid contact")
-            return
-        contact = list(self.contacts.keys())[contact]
-        return contact
-
-    # Main client function
-    def main(self):
-        global SERVER_HOST, SERVER_PORT, ADDRESS_LENGTH, MAIN_KEY_LENGTH
-        # Generate 10 random addresses
-        for i in range(10):
-            addr,seed = self.generate_address(),self.generate_address()
-            self.address[addr] = {"seed":seed}
-        del addr,seed#prevent missuse
-        print("Welcome to the chat client!")
-        Thread(target=self.listen_packets, daemon=True).start()
-
-        options = ("List addresses", "add contact" ,"chat","exit")#, "file", "Exit")
-        while True:
-            print("Options:")
-            for i, option in enumerate(options):
-                print(f" {i+1}. {option}")
-            choice = input("Enter your choice: ")
-            if choice == "1":
-                print("Addresses | Seeds:")
-                for addr, item in self.address.items():
-                    print(f" - {addr}|{item['seed']}")
-            elif choice == "2":
-                address,seed = input("Enter address|seed of the recipient: ").split("|")
-                if address in self.address and seed == self.address[address]:
-                    print("[-] You can't add yourself as a contact")
-                    continue
-                self.add_contact(address,seed)
-            elif choice == "3":
-                contact = self._get_contact()
-                if not contact:continue   
-                message = input("Enter your message: ")
-                self.send_message(contact, message)
-            elif choice == "4":
-                self.client.close()
-                exit()
-                #will be implemented in the next update (GUI)
-                # contact = self._get_contact()
-                # if not contact:continue
-                # file_path = filedialog.askopenfilename()
-                # file_name = os.path.basename(file_path)#max filename => 4096 - 9 = 4087 - otv (ONE_TIME_LENGTH) = 4055
-                # file_size = os.path.getsize(file_path)
-                # main_key = self.contacts[contact]["main_key"]
-                # r = self.contacts[contact]["random_iterator"]
-                # payload = SEND_OPCODE + file_size.to_bytes(8, "big") + file_name.encode("utf-8")
-                # payload = self.aes_encrypt(payload, main_key, r)
-                # payload = self.add_one_time(payload,r)
-                # self.client.sendall(payload)
-                # self.send_queue[contact] = file_path
-                # print(f"[+] file added to queue, will send when accepted")
-            # elif choice == "5":
-            #     self.client.close()
-            #     exit()
-            else:
-                print("Invalid choice")
-            input("Press Enter to continue...")
-            os.system("cls" if os.name == "nt" else "clear")
-
-
-if __name__ == "__main__":
-    os.system("cls" if os.name == "nt" else "clear")
-    client = Client()
-    client.main()
+        payload = self.aes_encrypt(payload, main_key, r)
+        payload = self.add_one_time(payload,r)
+        self.conn.sendall(payload)
 
     #NEXT UPDATE: (to have deterministic addresses)
     # password = input("Enter your password: ")
