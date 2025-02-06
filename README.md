@@ -18,11 +18,10 @@ EphemChat is a secure communication platform designed to ensure privacy and secu
 
 ## One-Time Verifier (OTV)
 
-The OTV is a cryptographically secure random value generated to verify the identity of the contact you're communicating with. It ensures that you're talking to the right person and not an imposter. (Note: The randomness of the OTV generator is currently under review for potential improvements.)
-
+The OTV is a cryptographically secure random value generated to verify the identity of the contact you're communicating with. It ensures that you're talking to the right person and not an imposter.
 ## Current Status
 
-⚠️ **Under Construction**: Gonna do the Gui now
+⚠️ **Under Construction**: File transfer doesn't work for file > 500kb, idk why the two contacts at a point are not aligned anymore resulting in a broken "channel".
 
 ## Feedback and Contributions
 
