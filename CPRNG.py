@@ -66,14 +66,9 @@ class Shake256PRNG:
 
 if __name__ == "__main__":
     # Example usage
-    seed = bytes.fromhex("f" * 64)
-    cprng = Shake256PRNG(seed,debug=True)
-    state = cprng.get_state()
-    for i in range(5):
-        print(cprng.randbytes(1).hex())
-    cprng.set_state(state)
-    for i in range(5):
-        print(cprng.randbytes(1).hex())
-    cprng.set_state(state)
-    for i in range(5):
-        print(cprng.randbytes(1).hex())
+    seed = secrets.token_hex(10000).encode("utf-8")
+    cprng1 = Shake256PRNG(seed,debug=True)
+    cprng2 = Shake256PRNG(seed,debug=True)
+    for i in range(10**6):
+        if i%10**5==0:print(i)
+        assert cprng1.randbytes(2**10) == cprng2.randbytes(2**10)
