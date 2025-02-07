@@ -82,7 +82,7 @@ class EphemChat(QMainWindow):
     def on_file_progress_gui(self, sender: str, received: int, fsize: int):
         if sender in self.progress_bars:
             self.progress_bars[sender].setValue(int(received / fsize * 100))
-            if received > fsize-1:
+            if received == -1:
                 self.progress_bars[sender].deleteLater()
                 self.progress_bars.pop(sender)
 

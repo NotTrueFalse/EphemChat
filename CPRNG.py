@@ -14,9 +14,9 @@ class Shake256PRNG:
         self.state = seed
         self.debug = debug
     
-    def iterate(self):
+    def iterate(self,n:int=1):
         """iterate to update the state"""
-        self.state = hashlib.shake_256(self.state).digest(32)
+        for i in range(n):self.state = hashlib.shake_256(self.state).digest(32)
 
     def randbytes(self, n=32):
         """
@@ -71,4 +71,4 @@ if __name__ == "__main__":
     cprng2 = Shake256PRNG(seed,debug=True)
     for i in range(10**6):
         if i%10**5==0:print(i)
-        assert cprng1.randbytes(2**10) == cprng2.randbytes(2**10)
+        assert cprng1.randbytes(32) == cprng2.randbytes(32)

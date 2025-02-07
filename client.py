@@ -7,6 +7,7 @@ from hashlib import shake_256
 import secrets
 from CPRNG import Shake256PRNG
 import re
+import time
 
 SERVER_HOST = '127.0.0.1'
 SERVER_PORT = 12345
@@ -22,6 +23,7 @@ ACCEPT_OPCODE = b"\x16"
 SEND_OPCODE = b"\x17"
 SENDING_OPCODE = b"\x18"
 MAX_FILE_SIZE = 1024**3*4#4GB max accepted file size
+DEBUG = 0
 def to_humain_readable(size:int)->str:
     for unit in ['Octets', 'Ko', 'Mo', 'Go', 'To']:
         if size < 1024.0:
@@ -196,24 +198,32 @@ class Client:
         plaintext = plaintext.rstrip(b"\x00")
         return plaintext
 
-    def ask(self,data:bytes,offset:int):
+    def ask(self,data:bytes,offset:int)->int:
         #0:1 -> OPCODE
         #1:11 -> TO ADDRESS
         #11:21 -> FROM CONTACT ADDRESS
         #21:53 -> MAIN KEY
+        #1+10+32+16 = 59
+        MAX_ASK = 1+ADDRESS_LENGTH+MAIN_KEY_LENGTH+(16%MAIN_KEY_LENGTH)
         to_addr = data[offset:offset+ADDRESS_LENGTH]
         try:
             to_addr = to_addr.decode("utf-8")
-            if not re.match(self.address_reg,to_addr):return
+            if not re.match(self.address_reg,to_addr):return 0
+            if to_addr not in self.address:return 0
+            if len(data) != MAX_ASK:return 0
+            print("c")
         except:#not a valid address
-            return
+            return 0
         if to_addr in self.address:
             #its me :D
             offset += ADDRESS_LENGTH
             contact = data[offset:offset+ADDRESS_LENGTH+(16%ADDRESS_LENGTH)]#to match the required length of AES that is %16 == 0
             null_iterator = Shake256PRNG(b"\x00")
             contact = self.aes_decrypt(contact, self.address[to_addr]["seed"],null_iterator)
-            contact = contact.decode("utf-8")
+            try:
+                contact = contact.decode("utf-8")
+            except:
+                return 0
             offset += ADDRESS_LENGTH+(16%ADDRESS_LENGTH)
             main_key = data[offset:offset+MAIN_KEY_LENGTH+(16%MAIN_KEY_LENGTH)]#match requirements
             null_iterator = Shake256PRNG(b"\x00")
@@ -241,14 +251,17 @@ class Client:
             payload = ACCEPT_OPCODE + verifier + contact_address
             self.conn.sendall(payload)
             del self.address[to_addr]#remove the address from the list (its used only once)
+            return 1
 
     def verify(self,data:bytes,offset:int):
         #0:32 -> VERIFIER
         #32:42 -> CONTACT ADDRESS
+        MAX_ACCEPT = 1+MAIN_KEY_LENGTH*2+2+ADDRESS_LENGTH+(16%ADDRESS_LENGTH)
         verifier = data[offset:offset+MAIN_KEY_LENGTH*2+2]
         try:
             verifier = verifier.decode("utf-8")
-            if not re.match(self.argon_reg,verifier):return
+            if not re.match(self.argon_reg,verifier):return 0
+            if len(data) != MAX_ACCEPT:return 0
         except:#not a valid verifier
             return
         verifier = "$argon2id$v=19$m=131072,t=2,p=2$" + verifier
@@ -268,7 +281,7 @@ class Client:
             except:pass#verify naturaly return an exception
         else:
             #can happen when two random personne try to match
-            return
+            return 0
         contact = data[offset:offset+ADDRESS_LENGTH+(16%ADDRESS_LENGTH)]
         null_iterator = Shake256PRNG(b"\x00")
         contact = self.aes_decrypt(contact, p, null_iterator).decode("utf-8")#replace random contact with the real one
@@ -276,6 +289,7 @@ class Client:
         del self.contacts[contact_address]#remove the random contact
         self.log(f"You have a new contact: {contact}")
         self.contact_update()
+        return 1
 
     def check_received(self,contact:str,data:bytes):
         """from a decrypted message check if the message is a request or a message"""
@@ -299,7 +313,7 @@ class Client:
                 return
             self.log(f"[*] Sending file: {file_name} ({to_humain_readable(file_size)})")
             chunk = self.send_queue[contact]["file"].read(4096-ONE_TIME_LENGTH-1)#-1 for the opcode, -ONE_TIME_LENGTH for the OTV
-            if not chunk:return#file is empty
+            if not chunk:return print("[-] Error: file is empty")
             self.send(contact, SENDING_OPCODE + chunk)
         elif OPCODE == SENDING_OPCODE:
             #user is sending a file
@@ -308,11 +322,13 @@ class Client:
             file_size = self.receive_queue[contact]["file_size"]
             file = self.receive_queue[contact]["file"]
             file.write(data[offset:])
+            if DEBUG:print(f"recv: {data[offset:10]}, t: {time.time()}")#debug
             self.receive_queue[contact]["received"] += len(data[offset:])
             self.progress(contact, self.receive_queue[contact]["received"])
             self.send(contact, OK_OPCODE)
         elif OPCODE == OK_OPCODE:
-            if data[offset:] != b"":return#should be empty (prevent receiving block and mis interpret it)
+            if data[offset:] != b"":return print("[-] Error: extra data after OK_OPCODE")
+            if DEBUG:print("OK, t: ",time.time())#debug
             if contact in self.send_queue:
                 #user need next chunk
                 file = self.send_queue[contact]["file"]
@@ -320,8 +336,10 @@ class Client:
                 if not chunk:
                     file.close()
                     del self.send_queue[contact]
+                    print("done sending file")
                     self.send(contact, OK_OPCODE)
                     return
+                if DEBUG:print(f"sent: {chunk[:10]}, t: {time.time()}")#debug
                 self.send(contact, SENDING_OPCODE + chunk)
             elif contact in self.receive_queue:
                 #done receiving file
@@ -330,6 +348,7 @@ class Client:
                 file_size = self.receive_queue[contact]["file_size"]
                 file.close()
                 print(f"file received: {file_name} ({to_humain_readable(file_size)})")
+                self.progress(contact, -1)#all done
                 del self.receive_queue[contact]
                 self.log(f"[+] File received: {file_name} ({to_humain_readable(file_size)})")
         else:
@@ -348,28 +367,32 @@ class Client:
             # try:
                 data = self.conn.recv(4096)
                 if not data:continue
+                #texting / sending file is more important than checking for OP_CODE
+                #so we need to check for the contact first (receiving a valid OTV by pure luck is extremely low, that's why we check for the contact first)
+
+                #check if the message come from a contact
+                #here there are no deterministic pattern for the message so we need to check for all contact the OTV
+                for contact in self.contacts:
+                    contact_random_iterator = self.contacts[contact]["random_iterator"]#use the random iterator of the contact
+                    contact_random_iterator_state = contact_random_iterator.get_state()#save the state of the random iterator to decrypt the message
+                    contact_random_iterator.iterate()
+                    OTcheck = self.check_one_time(data,contact_random_iterator)
+                    if OTcheck:
+                        contact_random_iterator.set_state(contact_random_iterator_state)#restore the state of the random iterator
+                        message = self.aes_decrypt(OTcheck, self.contacts[contact]["main_key"], contact_random_iterator)
+                        contact_random_iterator.iterate(2)#use two credit of the random iterator
+                        self.check_received(contact,message)
+                        break
+                    else:
+                        self.contacts[contact]["random_iterator"].set_state(contact_random_iterator_state)#restore the state of the random iterator
+                        # print("[-] Block not from a contact")
+
                 offset = 1
+                #test if functions work in case its not a ASK / ACCEPT / any other OP_CODE
                 if data[0:offset] == ASK_OPCODE:
-                    self.ask(data,offset)
-                elif data[0:offset] == ACCEPT_OPCODE:
-                    self.verify(data,offset)
-                else:
-                    #check if the message come from a contact
-                    #here there are no deterministic pattern for the message so we need to check for all contact the OTV
-                    for contact in self.contacts:
-                        contact_random_iterator = self.contacts[contact]["random_iterator"]#use the random iterator of the contact
-                        contact_random_iterator_state = contact_random_iterator.get_state()#save the state of the random iterator to decrypt the message
-                        contact_random_iterator.randbytes(32)#simulate the random iterator to get the same state as the sender
-                        OTcheck = self.check_one_time(data,contact_random_iterator)
-                        if OTcheck:
-                            contact_random_iterator.set_state(contact_random_iterator_state)#restore the state of the random iterator
-                            message = self.aes_decrypt(OTcheck, self.contacts[contact]["main_key"], contact_random_iterator)
-                            for i in range(2):contact_random_iterator.randbytes(32)#use two credit of the random iterator
-                            self.check_received(contact,message)
-                            break
-                        else:
-                            self.contacts[contact]["random_iterator"].set_state(contact_random_iterator_state)#restore the state of the random iterator
-                            print("[-] Block not from a contact")
+                    if self.ask(data,offset):continue
+                if data[0:offset] == ACCEPT_OPCODE:
+                    if self.verify(data,offset):continue
             # except Exception as e:
             #     print(f"Error receiving message: {e}")
             #     break
@@ -394,6 +417,7 @@ class Client:
         payload = self.aes_encrypt(payload, main_key, r)
         payload = self.add_one_time(payload,r)
         self.conn.sendall(payload)
+        if DEBUG:print(f"REAL sent: {payload[:10]}, t: {time.time()}")#debug
 
     #NEXT UPDATE: (to have deterministic addresses)
     # password = input("Enter your password: ")
