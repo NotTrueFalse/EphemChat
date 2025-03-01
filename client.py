@@ -16,14 +16,18 @@ ADDRESS_LENGTH = 10#10^63-9^63 => 9.9868998e+62  possibilities ((9.9868998e+62 )
 MAIN_KEY_LENGTH = 32
 #used to find your partner: OTV (One Time Verifier added randomly to the message)
 ONE_TIME_LENGTH = 32
+#how many octets to use to store the n° order of a file chunk (a file chunk is 4096 (4063-CHUNK_INTORD_SIZE data, 32 ONE_TIME, 1 SENDING_OPCODE) octets long)
+#so in theory we can send a file of (2^(8*CHUNK_INTORD_SIZE)-1)*(4063-CHUNK_INTORD_SIZE)/(1024**4) To before hitting the limit
+CHUNK_INTORD_SIZE = 8
 
 OK_OPCODE = b"\x01"
 ASK_OPCODE = b"\x15"#don't ask me why I choose 15, you can configure it to be anything (btw 01 - ff)
 ACCEPT_OPCODE = b"\x16"
 SEND_OPCODE = b"\x17"
 SENDING_OPCODE = b"\x18"
-MAX_FILE_SIZE = 1024**3*4#4GB max accepted file size
-DEBUG = 0
+MAX_FILE_SIZE = 1024**3*4#4GB max accepted file size (self imposed limit)
+#DEBUG: 0: no debug, 1: print debug, 2: print and save debug
+DEBUG = 2
 def to_humain_readable(size:int)->str:
     for unit in ['Octets', 'Ko', 'Mo', 'Go', 'To']:
         if size < 1024.0:
@@ -211,7 +215,6 @@ class Client:
             if not re.match(self.address_reg,to_addr):return 0
             if to_addr not in self.address:return 0
             if len(data) != MAX_ASK:return 0
-            print("c")
         except:#not a valid address
             return 0
         if to_addr in self.address:
@@ -228,7 +231,7 @@ class Client:
             main_key = data[offset:offset+MAIN_KEY_LENGTH+(16%MAIN_KEY_LENGTH)]#match requirements
             null_iterator = Shake256PRNG(b"\x00")
             main_key = self.aes_decrypt(main_key, self.address[to_addr]["seed"],null_iterator)#don't decode its mainly random bytes
-            r = Shake256PRNG(main_key,debug=True)
+            r = Shake256PRNG(main_key,debug=DEBUG==1)
             self.contacts[contact] = {"main_key":main_key,"random_iterator":r}
             self.log(f"You have a new contact: {contact}")
             self.contact_update()
@@ -291,13 +294,23 @@ class Client:
         self.contact_update()
         return 1
 
+    def chunk_generator(self,contact:str):
+        """Generate chunks of a file (with chunk order)"""
+        chunk_num = 0
+        while True:
+            chunk = self.send_queue[contact]["_file"].read(4096-ONE_TIME_LENGTH-1-CHUNK_INTORD_SIZE)
+            if not chunk:break
+            chunk_num += 1
+            chunk += chunk_num.to_bytes(CHUNK_INTORD_SIZE, "big")
+            yield chunk
+
     def check_received(self,contact:str,data:bytes):
         """from a decrypted message check if the message is a request or a message"""
         offset = 1
         #0:1 -> OPCODE
         #1:9 -> FILE SIZE
         #9: -> FILE NAME
-        OPCODE = data[0:offset]
+        OPCODE = data[:offset]
         if OPCODE == SEND_OPCODE:
             #user sent a file
             file_size = int.from_bytes(data[offset:offset+8], "big")
@@ -311,43 +324,49 @@ class Client:
             if file_size > MAX_FILE_SIZE:
                 print(f"[-] File size changed ({to_humain_readable(file_size)} > {to_humain_readable(MAX_FILE_SIZE)})")
                 return
-            self.log(f"[*] Sending file: {file_name} ({to_humain_readable(file_size)})")
-            chunk = self.send_queue[contact]["file"].read(4096-ONE_TIME_LENGTH-1)#-1 for the opcode, -ONE_TIME_LENGTH for the OTV
-            if not chunk:return print("[-] Error: file is empty")
-            self.send(contact, SENDING_OPCODE + chunk)
+            self.log(f"[*] loading file {file_name} ({to_humain_readable(file_size)}) in memory")
+            self.send_queue[contact]["chunks"] = []
+            for chunk in self.chunk_generator(contact):
+                self.send_queue[contact]["chunks"].append(chunk)
+            if not self.send_queue[contact]["chunks"]:
+                print("[-] Error: no chunks to send")
+                return
+            self.log(f"[*] sending chunks for {file_name}")
+            self.send(contact, SENDING_OPCODE + self.send_queue[contact]["chunks"].pop(0))
         elif OPCODE == SENDING_OPCODE:
             #user is sending a file
             if not self.receive_queue[contact]:return#no file to receive
-            file_name = self.receive_queue[contact]["file_name"]
-            file_size = self.receive_queue[contact]["file_size"]
-            file = self.receive_queue[contact]["file"]
-            file.write(data[offset:])
-            if DEBUG:print(f"recv: {data[offset:10]}, t: {time.time()}")#debug
-            self.receive_queue[contact]["received"] += len(data[offset:])
+            chunk = data[1:]#remove the opcode
+            chunk_num = int.from_bytes(chunk[-CHUNK_INTORD_SIZE:], "big")
+            chunk_data = chunk[:-CHUNK_INTORD_SIZE]
+            if DEBUG==1:print(f"recv: {data[offset:10]}, t: {time.time()}")#debug
+            self.receive_queue[contact]["received"] += len(data[1:][:-CHUNK_INTORD_SIZE])
             self.progress(contact, self.receive_queue[contact]["received"])
+            self.receive_queue[contact]["chunks"][str(chunk_num)] = chunk_data#place:chunk
             self.send(contact, OK_OPCODE)
         elif OPCODE == OK_OPCODE:
             if data[offset:] != b"":return print("[-] Error: extra data after OK_OPCODE")
-            if DEBUG:print("OK, t: ",time.time())#debug
+            if DEBUG==1:print("OK, t: ",time.time())#debug
             if contact in self.send_queue:
-                #user need next chunk
-                file = self.send_queue[contact]["file"]
-                chunk = file.read(4096-ONE_TIME_LENGTH-1)#-1 for the opcode, -ONE_TIME_LENGTH for the OTV
-                if not chunk:
-                    file.close()
-                    del self.send_queue[contact]
+                try:
+                    chunk = self.send_queue[contact]["chunks"].pop(0)
+                except IndexError as e:
                     print("done sending file")
+                    self.send_queue[contact]["_file"].close()
+                    del self.send_queue[contact]
                     self.send(contact, OK_OPCODE)
                     return
-                if DEBUG:print(f"sent: {chunk[:10]}, t: {time.time()}")#debug
+                if DEBUG==1:print(f"sent: {chunk[:10]}, t: {time.time()}")#debug
                 self.send(contact, SENDING_OPCODE + chunk)
             elif contact in self.receive_queue:
                 #done receiving file
-                file = self.receive_queue[contact]["file"]
+                chunks = self.receive_queue[contact]["chunks"]
                 file_name = self.receive_queue[contact]["file_name"]
                 file_size = self.receive_queue[contact]["file_size"]
-                file.close()
-                print(f"file received: {file_name} ({to_humain_readable(file_size)})")
+                with open(self.receive_queue[contact]["file_path"], "wb") as file:
+                    for chunk_num in sorted(chunks, key=lambda x: int(x)):
+                        file.write(chunks[chunk_num])
+                    file.close()
                 self.progress(contact, -1)#all done
                 del self.receive_queue[contact]
                 self.log(f"[+] File received: {file_name} ({to_humain_readable(file_size)})")
@@ -404,7 +423,7 @@ class Client:
         main_key = os.urandom(MAIN_KEY_LENGTH)
         # print(f"main_key: {main_key}")#debug
         idk_contact = self.generate_address()
-        r = Shake256PRNG(main_key,debug=True)
+        r = Shake256PRNG(main_key,debug=DEBUG==1)
         self.contacts[idk_contact] = {"main_key":main_key,"random_iterator":r}#temporarly save a random contact instead of the real one
         null_iterator = Shake256PRNG(b"\x00")
         main_key = self.aes_encrypt(main_key, seed, null_iterator)
@@ -417,7 +436,7 @@ class Client:
         payload = self.aes_encrypt(payload, main_key, r)
         payload = self.add_one_time(payload,r)
         self.conn.sendall(payload)
-        if DEBUG:print(f"REAL sent: {payload[:10]}, t: {time.time()}")#debug
+        if DEBUG==1:print(f"REAL sent: {payload[:10]}, t: {time.time()}")#debug
 
     #NEXT UPDATE: (to have deterministic addresses)
     # password = input("Enter your password: ")

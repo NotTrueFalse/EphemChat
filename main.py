@@ -210,8 +210,8 @@ class EphemChat(QMainWindow):
                         "file_path": file_path,
                         "file_name": file_name,
                         "file_size": file_size,
-                        "file": open(file_path, "wb"),
-                        "received": 0
+                        "chunks": {},
+                        "received": 0,
                     }
                     self.client.send(sender, ACCEPT_OPCODE)
                     self.create_progress_bar(sender)
@@ -244,7 +244,7 @@ class EphemChat(QMainWindow):
             self.client.send_queue[contact] = {
                 "file_name": file_name,
                 "file_size": file_size,
-                "file": open(file_path, "rb")
+                "_file": open(file_path, "rb"),
             }
             QMessageBox.information(self, "File added to queue", f"File {file_name} added to queue, will send when accepted")
         except OSError as e:

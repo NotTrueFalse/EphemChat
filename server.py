@@ -9,8 +9,7 @@ PORT = 12345
 clients = []
 lock = threading.Lock()
 
-# Function to handle a single client
-def handle_client(conn, addr):
+def handle_client(conn: socket.socket, addr: tuple):
     global clients
     with conn:
         print(f"New client connected: {addr}")
@@ -20,7 +19,6 @@ def handle_client(conn, addr):
                 data = conn.recv(4096)
                 if not data:
                     break
-                # print(f"Received data from {addr} ({len(data)})")
                 with lock:
                     for client in clients:
                         if client != conn:
