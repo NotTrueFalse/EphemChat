@@ -1,4 +1,3 @@
-__pycache__/CPRNG.cpython-311.pyc
-__pycache__/CPRNG.cpython-312.pyc
-__pycache__/client.cpython-312.pyc
-tests/__pycache__/random.cpython-312.pyc
+__pycache__/*
+tests/__pycache__/r*
+utils/__pycache__/*

@@ -1,11 +1,12 @@
 import socket
 import os
 from argon2 import PasswordHasher
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from threading import Thread
-from hashlib import shake_256
+from hashlib import sha256
 import secrets
-from CPRNG import Shake256PRNG
+from utils.CPRNG import Shake256PRNG
+from utils.AES import AES_Manager
+from utils.cool import to_humain_readable
 import re
 import time
 
@@ -28,12 +29,6 @@ SENDING_OPCODE = b"\x18"
 MAX_FILE_SIZE = 1024**3*4#4GB max accepted file size (self imposed limit)
 #DEBUG: 0: no debug, 1: print debug, 2: print and save debug
 DEBUG = 2
-def to_humain_readable(size:int)->str:
-    for unit in ['Octets', 'Ko', 'Mo', 'Go', 'To']:
-        if size < 1024.0:
-            break
-        size /= 1024.0
-    return f"{size:.2f} {unit}"
 
 CHUNK_DATA_SIZE = 4096 - ONE_TIME_LENGTH - 1 - CHUNK_INTORD_SIZE
 
@@ -48,6 +43,8 @@ class Client:
         self._events = {}
         self.address_reg = r"[A-Za-z0-9@]{10}"
         self.argon_reg = r"[A-Za-z0-9+/]{11,64}\$[A-Za-z0-9+/]{16,86}"
+        self.chunk_hash_logs = {}  # Store hashes for verification
+        self.aes = AES_Manager()
         for i in range(10):
             addr,seed = self.generate_address(),self.generate_address()
             self.address[addr] = {"seed":seed}
@@ -76,20 +73,6 @@ class Client:
 
     def progress(self, sender: str, progress: float):
         self.trigger_event('on_file_progress', sender, progress)
-
-    def iv_generator(self, random_iterator: Shake256PRNG) -> bytes:
-        global MAIN_KEY_LENGTH
-        """Generate a random IV from a seed (main_key)
-        Args:
-            random_iterator (Shake256PRNG): The random iterator used to generate the IV.
-        Returns:
-            bytes: The IV
-
-        Works by XORing the message number with the main key, then hashing the result with SHAKE-256.
-        Why: The IV is unpredictable to an attacker who doesn't know the main key.
-        """
-        iv = shake_256(random_iterator.randbytes(MAIN_KEY_LENGTH)).digest(16)
-        return iv
 
     def add_one_time(self,ciphertext:bytes,r:Shake256PRNG)-> bytes:
         """
@@ -157,53 +140,6 @@ class Client:
             address += allowed[byte%len(allowed)]
         return address
 
-    # AES Encryption
-    def aes_encrypt(self, plaintext: bytes, password: bytes, random_iterator:Shake256PRNG)->bytes:
-        """
-        Encrypts the given plaintext using AES encryption with the provided password.
-
-        Args:
-            plaintext (bytes): The data to be encrypted. If a string is provided, it will be encoded to bytes using UTF-8.
-            password (bytes): The password used for encryption. If a string is provided, it will be encoded to bytes using UTF-8.
-                              The password must be 32 bytes long. If it is not, it will be hashed using SHAKE-256 to generate a 16-byte key.
-            random_iterator (Shake256PRNG): The random iterator used to generate the initialization vector (IV). Default is a new random iterator seeded with 0.
-        Returns:
-            bytes: The encrypted ciphertext.
-        Raises:
-            ValueError: If the password length is not 32 bytes and cannot be hashed to the required length.
-        Notes:
-            - The plaintext is padded with null bytes to ensure its length is a multiple of 16 bytes.
-            - The initialization vector (IV) is generated using the `iv_generator` method, which is assumed to be defined elsewhere in the class.
-            - The AES encryption is performed in CBC mode.
-        """
-        if isinstance(password, str):
-            password = password.encode("utf-8")
-        if isinstance(plaintext, str):
-            plaintext = plaintext.encode("utf-8")
-        if len(password) != 32:
-            password = shake_256(password).digest(16)
-        if len(plaintext) % 16 != 0:
-            plaintext += b"\x00" * (16 - len(plaintext) % 16)
-        iv = self.iv_generator(random_iterator)
-        cipher = Cipher(algorithms.AES(password), modes.CBC(iv))
-        encryptor = cipher.encryptor()
-        ciphertext = encryptor.update(plaintext) + encryptor.finalize()
-        return ciphertext
-
-    # AES Decryption
-    def aes_decrypt(self, ciphertext: bytes, password: bytes, random_iterator:Shake256PRNG) -> bytes:
-        if isinstance(password, str):
-            password = password.encode("utf-8")
-        if len(password) != 32:
-            password = shake_256(password).digest(16)
-        iv = self.iv_generator(random_iterator)
-        cipher = Cipher(algorithms.AES(password), modes.CBC(iv))
-        decryptor = cipher.decryptor()
-        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-        #remove trailing null bytes
-        plaintext = plaintext.rstrip(b"\x00")
-        return plaintext
-
     def ask(self,data:bytes,offset:int)->int:
         #0:1 -> OPCODE
         #1:11 -> TO ADDRESS
@@ -224,7 +160,7 @@ class Client:
             offset += ADDRESS_LENGTH
             contact = data[offset:offset+ADDRESS_LENGTH+(16%ADDRESS_LENGTH)]#to match the required length of AES that is %16 == 0
             null_iterator = Shake256PRNG(b"\x00")
-            contact = self.aes_decrypt(contact, self.address[to_addr]["seed"],null_iterator)
+            contact = self.aes.decrypt(contact, self.address[to_addr]["seed"],null_iterator)
             try:
                 contact = contact.decode("utf-8")
             except:
@@ -232,7 +168,7 @@ class Client:
             offset += ADDRESS_LENGTH+(16%ADDRESS_LENGTH)
             main_key = data[offset:offset+MAIN_KEY_LENGTH+(16%MAIN_KEY_LENGTH)]#match requirements
             null_iterator = Shake256PRNG(b"\x00")
-            main_key = self.aes_decrypt(main_key, self.address[to_addr]["seed"],null_iterator)#don't decode its mainly random bytes
+            main_key = self.aes.decrypt(main_key, self.address[to_addr]["seed"],null_iterator)#don't decode its mainly random bytes
             r = Shake256PRNG(main_key,debug=DEBUG==1)
             self.contacts[contact] = {"main_key":main_key,"random_iterator":r}
             self.log(f"You have a new contact: {contact}")
@@ -244,7 +180,7 @@ class Client:
             #11:43 -> VERIFIER (hash of the main key)
             contact_address = self.generate_address()
             null_iterator = Shake256PRNG(b"\x00")
-            contact_address = self.aes_encrypt(contact_address, main_key,null_iterator)
+            contact_address = self.aes.encrypt(contact_address, main_key,null_iterator)
             ph = PasswordHasher(
                 time_cost=2,
                 memory_cost=2**17,
@@ -289,7 +225,7 @@ class Client:
             return 0
         contact = data[offset:offset+ADDRESS_LENGTH+(16%ADDRESS_LENGTH)]
         null_iterator = Shake256PRNG(b"\x00")
-        contact = self.aes_decrypt(contact, p, null_iterator).decode("utf-8")#replace random contact with the real one
+        contact = self.aes.decrypt(contact, p, null_iterator).decode("utf-8")#replace random contact with the real one
         self.contacts[contact] = self.contacts[contact_address].copy()
         del self.contacts[contact_address]#remove the random contact
         self.log(f"You have a new contact: {contact}")
@@ -400,7 +336,7 @@ class Client:
                     OTcheck = self.check_one_time(data,contact_random_iterator)
                     if OTcheck:
                         contact_random_iterator.set_state(contact_random_iterator_state)#restore the state of the random iterator
-                        message = self.aes_decrypt(OTcheck, self.contacts[contact]["main_key"], contact_random_iterator)
+                        message = self.aes.decrypt(OTcheck, self.contacts[contact]["main_key"], contact_random_iterator)
                         contact_random_iterator.iterate(2)#use two credit of the random iterator
                         self.check_received(contact,message)
                         break
@@ -421,21 +357,21 @@ class Client:
     def add_contact(self,address:str,seed:str):
         me_contact = self.generate_address()
         null_iterator = Shake256PRNG(b"\x00")
-        me_contact = self.aes_encrypt(me_contact, seed, null_iterator)
+        me_contact = self.aes.encrypt(me_contact, seed, null_iterator)
         main_key = os.urandom(MAIN_KEY_LENGTH)
         # print(f"main_key: {main_key}")#debug
         idk_contact = self.generate_address()
         r = Shake256PRNG(main_key,debug=DEBUG==1)
         self.contacts[idk_contact] = {"main_key":main_key,"random_iterator":r}#temporarly save a random contact instead of the real one
         null_iterator = Shake256PRNG(b"\x00")
-        main_key = self.aes_encrypt(main_key, seed, null_iterator)
+        main_key = self.aes.encrypt(main_key, seed, null_iterator)
         payload = ASK_OPCODE + address.encode("utf-8") + me_contact + main_key
         self.conn.sendall(payload)
 
     def send(self, contact: str, payload: bytes):
         main_key = self.contacts[contact]["main_key"]
         r = self.contacts[contact]["random_iterator"]
-        payload = self.aes_encrypt(payload, main_key, r)
+        payload = self.aes.encrypt(payload, main_key, r)
         payload = self.add_one_time(payload,r)
         self.conn.sendall(payload)
         if DEBUG==1:print(f"REAL sent: {payload[:10]}, t: {time.time()}")#debug

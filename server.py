@@ -24,7 +24,8 @@ def handle_client(conn: socket.socket, addr: tuple):
                         if client != conn:
                             client.sendall(data)
         except Exception as e:
-            print(f"Error handling client {addr}: {e}")
+            pass
+            # print(f"Error handling client {addr}: {e}")
         finally:
             with lock:
                 clients.remove(conn)
