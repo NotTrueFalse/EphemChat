@@ -35,6 +35,8 @@ def to_humain_readable(size:int)->str:
         size /= 1024.0
     return f"{size:.2f} {unit}"
 
+CHUNK_DATA_SIZE = 4096 - ONE_TIME_LENGTH - 1 - CHUNK_INTORD_SIZE
+
 class Client:
     def __init__(self, ip:str=SERVER_HOST, port:int=SERVER_PORT):
         self.ip = ip
@@ -298,7 +300,7 @@ class Client:
         """Generate chunks of a file (with chunk order)"""
         chunk_num = 0
         while True:
-            chunk = self.send_queue[contact]["_file"].read(4096-ONE_TIME_LENGTH-1-CHUNK_INTORD_SIZE)
+            chunk = self.send_queue[contact]["_file"].read(CHUNK_DATA_SIZE)
             if not chunk:break
             chunk_num += 1
             chunk += chunk_num.to_bytes(CHUNK_INTORD_SIZE, "big")
@@ -339,8 +341,8 @@ class Client:
             chunk = data[1:]#remove the opcode
             chunk_num = int.from_bytes(chunk[-CHUNK_INTORD_SIZE:], "big")
             chunk_data = chunk[:-CHUNK_INTORD_SIZE]
-            if DEBUG==1:print(f"recv: {data[offset:10]}, t: {time.time()}")#debug
-            self.receive_queue[contact]["received"] += len(data[1:][:-CHUNK_INTORD_SIZE])
+            if DEBUG==1:print(f"recv: {chunk_data[:10]}, t: {time.time()}")#debug
+            self.receive_queue[contact]["received"] += len(chunk_data)
             self.progress(contact, self.receive_queue[contact]["received"])
             self.receive_queue[contact]["chunks"][str(chunk_num)] = chunk_data#place:chunk
             self.send(contact, OK_OPCODE)
